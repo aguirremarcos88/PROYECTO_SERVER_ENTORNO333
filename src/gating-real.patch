@@ -1,0 +1,58 @@
+*** a/monitor.py
+--- b/monitor.py
+@@
+ class SubHandler:
+     def __init__(self, client: Client, ncache: NodeCache):
+         self.client = client
+         self.ncache = ncache
++    
++    async def _apply_gate_mode(self, gate_open: bool):
++        """
++        Gating REAL a nivel GMF:
++        - gate cerrado  => desuscribir GMF de TODOS los grupos
++        - gate abierto  => habilitar GMF SOLO para grupos con TOTAL_FAULT=1
++        """
++        if not gate_open:
++            for g in CFG.node_groups:
++                await self.ncache.disable_gmf_for_group(g)
++            return
++        # gate abierto
++        for g in CFG.node_groups:
++            tf1 = STATE.state_tf_known.get(g, False) and STATE.current_total_fault.get(g, False)
++            if tf1:
++                await self.ncache.enable_gmf_for_group(g, CFG.sub_queue_size)
+ 
+@@
+-    def _on_gate_total_start(self, val_bool: bool, ahora: datetime):
++    def _on_gate_total_start(self, val_bool: bool, ahora: datetime):
+         prev = STATE.gate_open
+         STATE.gate_open = bool(val_bool)
+         STATE.gate_known = True
+         STATE.gate_last_change = ahora
+ 
+@@
+-        if prev and not STATE.gate_open:
+-            # ❗ No desuscribimos GMF: necesitamos escuchar caídas para exportar en caliente
+-            self._freeze_all(ahora)
+-        elif (not prev) and STATE.gate_open:
+-            self._unfreeze_all(ahora)
+-            # Nada que habilitar/deshabilitar aquí; TF maneja GMF por grupo
++        if prev and not STATE.gate_open:
++            # Gate se cierra: congelamos tiempos y APAGAMOS GMF (gating real)
++            self._freeze_all(ahora)
++            asyncio.create_task(self._apply_gate_mode(False))
++        elif (not prev) and STATE.gate_open:
++            # Gate se abre: descongelar y volver a prender GMF sólo donde TF=1
++            self._unfreeze_all(ahora)
++            asyncio.create_task(self._apply_gate_mode(True))
+ 
+@@
+-            # GMF dinámicas: habilitar si TF=1 (independiente del gate)
+-            if STATE.state_tf_known.get(grupo, False) and STATE.current_total_fault.get(grupo, False):
++            # GMF dinámicas: habilitar si TF=1 y el gate está ABIERTO
++            if (
++                STATE.state_tf_known.get(grupo, False)
++                and STATE.current_total_fault.get(grupo, False)
++                and ((not STATE.gate_known) or STATE.gate_open)
++            ):
+                 await ncache.enable_gmf_for_group(grupo, CFG.sub_queue_size)
